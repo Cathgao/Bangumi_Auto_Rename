@@ -6,6 +6,7 @@ import tmdbsimple as tmdb
 
 from ..logger import logger
 from ..config.config_manager import cm
+from .bangumi_api import BangumiAPI
 from .cleaner import is_chinese_percentage_sufficient
 
 
@@ -13,6 +14,22 @@ class Search:
     def __init__(self) -> None:
         self.TMDB_KEY = cm.get_config('api_key')
         tmdb.API_KEY = self.TMDB_KEY
+        self.bangumi = BangumiAPI()
+
+    def search_bangumi(
+        self,
+        query: str,
+        year: int = 0,
+        is_movie: Optional[bool] = None,
+        season_number: int = 1,
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        """使用 Bangumi 搜索动画信息"""
+        return self.bangumi.search_anime(
+            query=query,
+            year=year,
+            is_movie=is_movie,
+            season_number=season_number,
+        )
 
     def get_season_info(
         self, tv_id: int, season_number: int
@@ -111,6 +128,9 @@ class Search:
         if not tv_info or "id" not in tv_info:
             logger.error("[季度信息] 无效的电视剧信息，无法填充季度信息")
             return tv_info
+
+        if tv_info.get("source") == "bangumi":
+            return self.bangumi.fill_season_info(tv_info)
 
         tv_id = tv_info["id"]
         seasons = tv_info.get("seasons", [])

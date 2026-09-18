@@ -25,6 +25,9 @@ class ConfigPage(ui.dialog):
                 "font-size: 16px; font-weight: bold; margin-top: 10px;"
             )
             basic_configs = [
+                "anime_info_source",
+                "bangumi_token",
+                "bangumi_base_url",
                 "api_key",
                 "bangumi_path",
                 "movie_path",
@@ -61,8 +64,11 @@ class ConfigPage(ui.dialog):
             for cn in ai_configs:
                 self._create_config_row(cn)
 
-            # AI功能测试按钮
+            # 功能测试按钮
             with ui.row(wrap=False).classes("w-full justify-center mt-4 gap-2"):
+                RedButton(
+                    "🎌 测试Bangumi API", on_click=self._test_bangumi_api
+                ).props("outline")
                 RedButton(
                     "🧪 测试AI识别功能", on_click=self._test_ai_recognition
                 ).props("outline")
@@ -150,6 +156,14 @@ class ConfigPage(ui.dialog):
                         )
                         tg.style("font-size: 10px")
                         tg.classes("flex no-wrap w-full")
+                    elif cn == "anime_info_source":
+                        tg = RedToogle(
+                            ["bangumi", "tmdb"],
+                            value=cm.get_config(cn) or "bangumi",
+                            on_change=lambda e, c=cn: self._change(c, e.value),
+                        )
+                        tg.style("font-size: 10px")
+                        tg.classes("flex no-wrap w-full")
                     else:
                         ui.input(
                             value=cm.get_config(cn),
@@ -180,7 +194,7 @@ class ConfigPage(ui.dialog):
 
     def _handle_ok(self):
         # 验证URL配置项
-        url_configs = ["ai_base_url", "gemini_base_url"]
+        url_configs = ["ai_base_url", "gemini_base_url", "bangumi_base_url"]
         for url_config in url_configs:
             if hasattr(self.config, url_config):
                 url_value = getattr(self.config, url_config)
@@ -199,7 +213,7 @@ class ConfigPage(ui.dialog):
             )
         config_show = cm.config.copy()
         for key in config_show.keys():
-            if "api_key" in key:
+            if "api_key" in key or "token" in key:
                 config_show[key] = len(str(config_show[key])) * "*"
 
         logger.info('[配置] 配置已修改为： {}'.format(config_show))
@@ -288,6 +302,42 @@ class ConfigPage(ui.dialog):
         except Exception as e:
             logger.error(f"[配置] OpenAI API测试失败: {str(e)}")
             ui.notify(f"❌ OpenAI API测试失败: {str(e)}", type="negative")
+
+    async def _test_bangumi_api(self):
+        """测试Bangumi API连通性与检索功能"""
+        try:
+            ui.notify("🎌 开始测试Bangumi API，请稍候...", type="info")
+            base_url = (
+                getattr(self.config, "bangumi_base_url", None)
+                or cm.get_config("bangumi_base_url")
+            )
+            token = (
+                getattr(self.config, "bangumi_token", None)
+                or cm.get_config("bangumi_token")
+            )
+            from ..rename.bangumi_api import BangumiAPI
+
+            api = BangumiAPI(base_url=base_url, token=token)
+
+            import asyncio
+
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: api.search_anime("葬送的芙莉莲", year=2023)
+            )
+            name, info = result
+            if name and info:
+                ui.notify(
+                    f"✅ Bangumi API 测试成功: 成功检索《{name}》 (ID: {info.get('id')})",
+                    type="positive",
+                )
+            else:
+                ui.notify(
+                    "❌ Bangumi API 未能检索到测试动画，请检查网络或配置",
+                    type="warning",
+                )
+        except Exception as e:
+            logger.error(f"[配置] Bangumi API 测试失败: {str(e)}")
+            ui.notify(f"❌ Bangumi API 测试失败: {str(e)}", type="negative")
 
     def _show_ai_test_results(self, result: dict):
         """显示AI识别测试结果"""

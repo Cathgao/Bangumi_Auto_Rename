@@ -260,9 +260,50 @@ class Rename:
         is_anime: Optional[bool] = None,
         is_movie: Optional[bool] = None,
     ) -> Union[Tuple[str, Dict, bool, bool], str]:
+        preferred_source = cm.get_config('anime_info_source') or 'bangumi'
+        season_id = extract_season(path.name)
+        if season_id == -1:
+            season_id = extract_season(rtpath_name)
+
+        # 【首选判断】如果明确是动画，或者未指定且动画首选源为 Bangumi，优先从 Bangumi 检索
+        if is_anime is True or (is_anime is None and preferred_source == 'bangumi'):
+            logger.info(f'[处理任务] 优先使用 Bangumi 搜索动画: {rtpath_name}')
+            b_name, b_info = self.search.search_bangumi(
+                query=rtpath_name,
+                year=year,
+                is_movie=is_movie,
+                season_number=season_id if season_id > 1 else 1,
+            )
+            # 如果带年份没搜到，尝试去除年份再搜一次
+            if not b_name and year != 0:
+                logger.info(f'[处理任务] Bangumi 带年份未搜索到，尝试去掉年份重试: {rtpath_name}')
+                b_name, b_info = self.search.search_bangumi(
+                    query=rtpath_name,
+                    year=0,
+                    is_movie=is_movie,
+                    season_number=season_id if season_id > 1 else 1,
+                )
+
+            if b_name and b_info:
+                detected_is_movie = b_info.get('is_movie', False)
+                final_is_movie = is_movie if is_movie is not None else detected_is_movie
+                logger.info(
+                    f'[处理任务] Bangumi 成功匹配: 《{b_name}》 (类型: {"电影" if final_is_movie else "剧集"})'
+                )
+                return b_name, b_info, True, final_is_movie
+            else:
+                logger.info('[处理任务] Bangumi 未检索到对应动画，尝试回退至 TMDB...')
+
+        # 若未从 Bangumi 匹配到，或者为非动画任务，回退使用 TMDB
+        if not self.search.TMDB_KEY:
+            logger.warning('[处理任务] 未配置 TMDB API 密钥，无法从 TMDB 检索')
+            if is_anime:
+                return f'[Bangumi/TMDB] 未搜索到动画信息，且未配置 TMDB API Key，跳过 {rtpath_name}'
+            return '你还没有配置TMDB的Key！任务失败！请先前往配置界面！'
+
         season_id = 1
         pos = 0
-        logger.info('[处理任务] 未传入任务类型，开始判断该文件是否为电影！')
+        logger.info('[处理任务] 开始从 TMDB 判断该文件是否为电视剧/电影！')
 
         s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
         logger.info(f'[处理任务] 搜索到的电视剧名称: {s1_name}')
@@ -358,7 +399,11 @@ class Rename:
         else:
             _uuid = str(uuid.uuid4())
 
-        if not self.search.TMDB_KEY:
+        # 检查 TMDB Key (仅当非动画且未配置 TMDB Key 时提示)
+        preferred_source = cm.get_config('anime_info_source') or 'bangumi'
+        if not self.search.TMDB_KEY and (
+            _is_anime is False or (_is_anime is None and preferred_source != 'bangumi')
+        ):
             return self.error_reply(
                 _uuid,
                 '你还没有配置TMDB的Key！任务失败！请先前往配置界面！',
@@ -392,6 +437,16 @@ class Rename:
         rtpath_name = remove_season(rtpath_name)
         rtpath_name = remove_episode(rtpath_name)
         rtpath_name = rtpath_name.strip('!')
+
+        # 如果目录名经过清洗后为空（如纯季名 Season 2），回退使用父级目录名称
+        if not rtpath_name.strip() and path.parent and path.parent != path:
+            parent_name = remove_tag(path.parent.name)
+            parent_name = remove_season(parent_name)
+            parent_name = remove_episode(parent_name).strip('!')
+            if parent_name:
+                rtpath_name = parent_name
+                logger.info(f'[处理任务] 目录为季/集标识，回退使用父目录名称: {rtpath_name}')
+
         logger.info(f'[处理任务] 去除标签后: {rtpath_name}')
 
         # 如果该路径不是一个视频文件或者不是一个文件夹, 则跳过
@@ -433,10 +488,11 @@ class Rename:
         # 如果是电影
         if is_movie:
             if not name:
+                source_label = info.get('source', 'TMDB').upper() if info else 'TMDB'
                 logger.warning(f'[处理任务] 未搜索到电影信息, 跳过{rtpath_name}')
                 return self.error_reply(
                     _uuid,
-                    f'[TMDB] 未搜索到电影信息, 跳过{rtpath_name}',
+                    f'[{source_label}] 未搜索到电影信息, 跳过{rtpath_name}',
                     path,
                     is_anime,
                     is_movie,
@@ -447,7 +503,12 @@ class Rename:
             else:
                 _WORK_PATH = self.MOVIE_PATH
 
-            first_data = info['release_date']
+            first_data = (
+                info.get('release_date')
+                or info.get('first_air_date')
+                or info.get('date')
+                or '2000-01-01'
+            )
             first_year = first_data.split('-')[0]
             work_path = _WORK_PATH / f'{name} ({first_year})'
             work_path.mkdir(parents=True, exist_ok=True)
@@ -462,7 +523,7 @@ class Rename:
         else:
             if is_anime:
                 if not name:
-                    logger.info('[处理任务] TMDB未搜索到!转为MyAnimeList搜索！')
+                    logger.info('[处理任务] 未搜索到动画! 转为 MyAnimeList 搜索！')
                     search_result = jikan.search(
                         'anime',
                         rtpath_name,
@@ -482,23 +543,29 @@ class Rename:
                     titles = data['titles']
                     logger.info((f'[处理任务] MyAnimeList识别结果: {titles}'))
                 else:
-                    titles = None
+                    titles = info.get('titles')
                 _WORK_PATH = self.ANIME_PATH
             else:
                 titles = [{'type': 'Default', 'title': name}]
                 _WORK_PATH = self.BANGUMI_PATH
 
             if not name:
+                source_label = info.get('source', 'TMDB').upper() if info else 'TMDB'
                 logger.warning(f'[处理任务] 未搜索到剧集信息, 跳过{rtpath_name}')
                 return self.error_reply(
                     _uuid,
-                    f'[TMDB] 未搜索到剧集信息, 跳过{rtpath_name}',
+                    f'[{source_label}] 未搜索到剧集信息, 跳过{rtpath_name}',
                     path,
                     is_anime,
                     is_movie,
                 )
 
-            first_data: str = info['first_air_date']
+            first_data: str = (
+                info.get('first_air_date')
+                or info.get('release_date')
+                or info.get('date')
+                or '2000-01-01'
+            )
             first_year = first_data.split('-')[0]
             work_path = _WORK_PATH / f'{name} ({first_year})'
 

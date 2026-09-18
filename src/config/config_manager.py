@@ -26,9 +26,15 @@ CONFIG_DEFAULT = {
     "openai_output_format": "function_calling",  # OpenAI输出格式选择
     "ai_auto_save": False,  # 是否自动保存AI分析结果
     "log_level": "INFO",  # 日志等级
+    "anime_info_source": "bangumi",  # 动画首选信息源 (bangumi / tmdb)
+    "bangumi_token": "",  # Bangumi Access Token (可选)
+    "bangumi_base_url": "https://api.bgm.tv",  # Bangumi API 地址
 }
 
 CN_MAP = {
+    "anime_info_source": "🎌 动画信息源",
+    "bangumi_token": "🔑 Bangumi Access Token",
+    "bangumi_base_url": "🌐 Bangumi API地址",
     "api_key": "🔑 TMDB API密钥",
     "bangumi_path": "🎬 电视剧路径",
     "movie_path": "🎬 电影路径",
