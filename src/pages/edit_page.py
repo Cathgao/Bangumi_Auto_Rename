@@ -2,7 +2,9 @@ from pathlib import Path
 from typing import Optional
 from types import SimpleNamespace
 
-from nicegui import ui
+from nicegui import ui, run
+
+from ..component.retry_dialog import create_retry_callback
 
 from ..logger import logger
 from ..rename.process import Rename
@@ -121,7 +123,7 @@ class EditPage(ui.dialog):
     def _change(self, key: str, value) -> None:
         setattr(self.data, key, value)
 
-    def _handle_ok(self):
+    async def _handle_ok(self):
         write_task(self.uuid, self.data.__dict__)
         logger.info(f'[任务] 任务{self.uuid}已修改为： {self.data.__dict__}')
         notify('修改成功！重新开始识别！')
@@ -136,14 +138,17 @@ class EditPage(ui.dialog):
             original_ai_enabled = cm.get_config('ai_enabled')
             cm.set_config('ai_enabled', False)
 
+        confirm_retry = create_retry_callback()
         try:
-            Rename().process(
+            await run.io_bound(
+                Rename().process,
                 Path(getattr(self.data, 'path')),
                 text_to_value(getattr(self.data, 'is_anime')),
                 text_to_value(getattr(self.data, 'is_movie')),
                 getattr(self.data, 'uuid'),
                 getattr(self.data, 'name'),
                 getattr(self.data, 'season_id'),
+                confirm_retry=confirm_retry,
             )
         finally:
             if not use_ai:

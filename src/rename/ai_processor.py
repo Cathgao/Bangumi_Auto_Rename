@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from ..logger import logger
 from .utils import VIDEO_SUFFIX
@@ -16,15 +16,18 @@ class AIProcessor:
         self.video_analyzer = VideoAnalyzer()
 
     def analyze_anime_files(
-        self, path: Path, anime_info: Dict
+        self,
+        path: Path,
+        anime_info: Dict,
+        confirm_retry: Optional[Callable[[str], bool]] = None,
     ) -> Optional[AIAnalysisResult]:
         """
         使用AI分析动漫文件的映射关系
 
         Args:
             path: 本地文件路径
-            anime_info: TMDB动漫信息
-            season_info: 特定季度信息（可选）
+            anime_info: TMDB/Bangumi动漫信息
+            confirm_retry: API报错时的重试确认回调
 
         Returns:
             验证后的AI分析结果
@@ -43,7 +46,9 @@ class AIProcessor:
         file_analysis = self.video_analyzer.analyze_video_files(path, video_files)
 
         # 使用AI分析映射关系
-        ai_result = self.ai_client.analyze_episode_mapping(anime_info, file_analysis)
+        ai_result = self.ai_client.analyze_episode_mapping(
+            anime_info, file_analysis, confirm_retry=confirm_retry
+        )
 
         if ai_result:
             logger.info(f"[AI处理] AI分析完成，置信度: {ai_result.confidence}")

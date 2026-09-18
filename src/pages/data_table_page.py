@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List
 
-from nicegui import ui
+from nicegui import ui, run
 from nicegui.events import GenericEventArguments
 
 from ..element.red import notify
@@ -9,6 +9,7 @@ from .edit_page import edit_page
 from ..utils.utils import get_task
 from ..rename.process import Rename
 from ..utils.path import TASK_PATH, RECORD_PATH
+from ..component.retry_dialog import create_retry_callback
 
 
 @ui.refreshable
@@ -112,13 +113,20 @@ async def handle_edit(ev: GenericEventArguments):
     create_table.refresh()
 
 
-def handle_retry(ev: GenericEventArguments):
+async def handle_retry(ev: GenericEventArguments):
     arg = ev.args
     row_data = arg['row']
     path = row_data['path']
     is_anime = row_data['is_anime']
     is_movie = row_data['is_movie']
-    data = Rename().process(Path(path), is_anime, is_movie)
+    confirm_retry = create_retry_callback()
+    data = await run.io_bound(
+        Rename().process,
+        Path(path),
+        is_anime,
+        is_movie,
+        confirm_retry=confirm_retry,
+    )
     if isinstance(data, str):
         notify(data)
     else:

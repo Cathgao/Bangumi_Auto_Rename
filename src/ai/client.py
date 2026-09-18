@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from ..logger import logger
 from .models import AIAnalysisResult
@@ -31,6 +31,7 @@ class AIClient:
         self,
         anime_info: Dict,
         local_files: List[Dict],
+        confirm_retry: Optional[Callable[[str], bool]] = None,
     ) -> Optional[AIAnalysisResult]:
         """
         分析本地文件与TMDB剧集的映射关系
@@ -38,6 +39,7 @@ class AIClient:
         Args:
             anime_info: TMDB动漫信息
             local_files: 本地文件信息列表，包含文件名、路径、时长等
+            confirm_retry: API报错时的重试确认回调
 
         Returns:
             验证后的AIAnalysisResult对象
@@ -47,7 +49,9 @@ class AIClient:
             return None
 
         logger.info(f"[AI识别] 使用 {self.provider.upper()} 进行分析")
-        result = self._client.analyze_episode_mapping(anime_info, local_files)
+        result = self._client.analyze_episode_mapping(
+            anime_info, local_files, confirm_retry=confirm_retry
+        )
 
         # 统一在此处保存分析数据
         self._client._save_analysis_data(anime_info, local_files, result)

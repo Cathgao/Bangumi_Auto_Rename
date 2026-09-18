@@ -3,7 +3,7 @@ import json
 import uuid
 from pathlib import Path
 from difflib import SequenceMatcher
-from typing import Dict, List, Tuple, Union, Optional
+from typing import Callable, Dict, List, Tuple, Union, Optional
 
 from jikanpy import Jikan
 
@@ -13,6 +13,7 @@ from .get_info import Search
 from ..utils.path import TASK_PATH
 from .ai_processor import AIProcessor
 from ..config.config_manager import cm
+from ..exception import TaskAbortedException
 from ..ai.models import AIAnalysisResult
 from .utils import S0_TAG, EXTRA_TAG, IGNORE_DIR, VIDEO_SUFFIX, IGNORE_SUFFIX
 from .cleaner import (
@@ -215,6 +216,7 @@ class Rename:
         _tuuid: Optional[str] = None,
         cus_name: Optional[str] = None,
         cus_season_id: Optional[int] = None,
+        confirm_retry: Optional[Callable[[str], bool]] = None,
     ):
         if path.is_dir():
             is_video = False
@@ -223,32 +225,39 @@ class Rename:
                     is_video = True
 
             if is_video:
-                self._process(
+                return self._process(
                     path,
                     _is_anime,
                     _is_movie,
                     _tuuid,
                     cus_name,
                     cus_season_id,
+                    confirm_retry=confirm_retry,
                 )
             else:
+                last_res = None
                 for sub_path in path.iterdir():
-                    self._process(
+                    last_res = self._process(
                         sub_path,
                         _is_anime,
                         _is_movie,
                         _tuuid,
                         cus_name,
                         cus_season_id,
+                        confirm_retry=confirm_retry,
                     )
+                    if isinstance(last_res, str) and last_res == "任务已终止":
+                        return last_res
+                return last_res
         else:
-            self._process(
+            return self._process(
                 path,
                 _is_anime,
                 _is_movie,
                 _tuuid,
                 cus_name,
                 cus_season_id,
+                confirm_retry=confirm_retry,
             )
 
     def check_task_type(
@@ -393,6 +402,7 @@ class Rename:
         _tuuid: Optional[str] = None,
         cus_name: Optional[str] = None,
         cus_season_id: Optional[int] = None,
+        confirm_retry: Optional[Callable[[str], bool]] = None,
     ):
         if _tuuid:
             _uuid = _tuuid
@@ -585,9 +595,23 @@ class Rename:
                 logger.info("[处理任务] 启用AI分析动漫文件映射")
                 logger.info("[处理任务] 填充详细季信息")
                 tv_info = self.search.fill_season_info(info)
-                ai_result: AIAnalysisResult | None = (
-                    self.ai_processor.analyze_anime_files(path, tv_info)
-                )
+                try:
+                    ai_result: AIAnalysisResult | None = (
+                        self.ai_processor.analyze_anime_files(
+                            path, tv_info, confirm_retry=confirm_retry
+                        )
+                    )
+                except TaskAbortedException:
+                    logger.info(f"[处理任务] 用户主动终止当前任务: {path.name}")
+                    return self.error_reply(
+                        _uuid,
+                        "任务已终止",
+                        path,
+                        is_anime,
+                        is_movie,
+                        name,
+                        season_id,
+                    )
 
                 # 检查AI置信度阈值
                 confidence_threshold = cm.get_config("ai_confidence_threshold")
@@ -621,8 +645,13 @@ class Rename:
                         self._process_traditional(
                             path, rtpath_name, work_path, season_id
                         )
+                elif ai_result:
+                    logger.info(
+                        f"[处理任务] AI置信度不足({ai_result.confidence} < {confidence_threshold})，使用传统方法处理"
+                    )
+                    self._process_traditional(path, rtpath_name, work_path, season_id)
                 else:
-                    logger.info("[处理任务] AI置信度不足或AI结果无效，使用传统方法处理")
+                    logger.info("[处理任务] AI未能返回有效结果（接口报错或用户放弃重试），使用传统方法处理")
                     self._process_traditional(path, rtpath_name, work_path, season_id)
             else:
                 # 传统处理方式

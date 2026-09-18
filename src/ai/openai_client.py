@@ -1,11 +1,13 @@
 import re
 import json
-from typing import Dict, List, Optional
+import time
+from typing import Callable, Dict, List, Optional
 
 from openai import OpenAI
 from pydantic import ValidationError
 
 from ..logger import logger
+from ..exception import TaskAbortedException
 from .base_client import BaseAIClient
 from .models import AIAnalysisResult
 from ..config.config_manager import cm
@@ -37,6 +39,7 @@ class OpenAIClient(BaseAIClient):
         self,
         anime_info: Dict,
         local_files: List[Dict],
+        confirm_retry: Optional[Callable[[str], bool]] = None,
     ) -> Optional[AIAnalysisResult]:
         """
         使用OpenAI API分析本地文件与TMDB剧集的映射关系
@@ -44,6 +47,7 @@ class OpenAIClient(BaseAIClient):
         Args:
             anime_info: TMDB动漫信息
             local_files: 本地文件信息列表，包含文件名、路径、时长等
+            confirm_retry: API报错时的重试确认回调
 
         Returns:
             验证后的AIAnalysisResult对象
@@ -87,28 +91,58 @@ class OpenAIClient(BaseAIClient):
             logger.debug(
                 f"[OpenAI识别] Request: {json.dumps(request_params, indent=2, ensure_ascii=False)}"
             )
-            response = self.client.chat.completions.create(**request_params)
 
-            response_message = response.choices[0].message
-            logger.debug(f"[OpenAI识别] Response content: {response_message.content}")
-            if not response_message:
-                logger.error("[OpenAI识别] OpenAI 响应内容为空")
-                return None
+            while True:
+                try:
+                    response = self.client.chat.completions.create(**request_params)
+                except Exception as e:
+                    logger.error(f"[OpenAI识别] OpenAI API调用失败: {e}")
+                    if confirm_retry:
+                        choice = confirm_retry(str(e))
+                        if choice is True or choice == "retry":
+                            logger.info("[OpenAI识别] 用户选择重试 OpenAI API 调用，正在重新请求...")
+                            time.sleep(1)
+                            continue
+                        elif choice == "abort":
+                            raise TaskAbortedException("用户主动终止任务")
+                    return None
 
-            # 提取并验证JSON内容
-            result = self._extract_and_validate_json(response_message)
+                response_message = response.choices[0].message
+                logger.debug(f"[OpenAI识别] Response content: {response_message.content}")
+                if not response_message:
+                    logger.error("[OpenAI识别] OpenAI 响应内容为空")
+                    if confirm_retry:
+                        choice = confirm_retry("OpenAI 响应内容为空")
+                        if choice is True or choice == "retry":
+                            time.sleep(1)
+                            continue
+                        elif choice == "abort":
+                            raise TaskAbortedException("用户主动终止任务")
+                    return None
 
-            if not result:
-                logger.error("[OpenAI识别] 无法解析或验证OpenAI响应")
-                return None
+                # 提取并验证JSON内容
+                result = self._extract_and_validate_json(response_message)
 
-            # 记录低置信度结果
-            if result.confidence == "Low":
-                logger.warning(f"[OpenAI识别] 低置信度结果: {result.reason}")
+                if not result:
+                    logger.error("[OpenAI识别] 无法解析或验证OpenAI响应")
+                    if confirm_retry:
+                        choice = confirm_retry("无法解析或验证OpenAI响应")
+                        if choice is True or choice == "retry":
+                            time.sleep(1)
+                            continue
+                        elif choice == "abort":
+                            raise TaskAbortedException("用户主动终止任务")
+                    return None
 
-            logger.info(f"[OpenAI识别] 分析完成，置信度: {result.confidence}")
-            return result
+                # 记录低置信度结果
+                if result.confidence == "Low":
+                    logger.warning(f"[OpenAI识别] 低置信度结果: {result.reason}")
 
+                logger.info(f"[OpenAI识别] 分析完成，置信度: {result.confidence}")
+                return result
+
+        except TaskAbortedException:
+            raise
         except Exception as e:
             logger.error(f"[OpenAI识别] 分析失败: {str(e)}")
             return None
