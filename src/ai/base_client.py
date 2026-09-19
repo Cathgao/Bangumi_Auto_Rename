@@ -2,7 +2,7 @@ import json
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..config.config_manager import cm
 from ..logger import logger
@@ -27,7 +27,7 @@ class BaseAIClient(ABC):
         self,
         anime_info: Dict,
         local_files: List[Dict],
-        confirm_retry: Optional[Callable[[str], bool]] = None,
+        confirm_retry: Optional[Callable[..., Any]] = None,
     ) -> Optional[AIAnalysisResult]:
         """
         分析本地文件与TMDB剧集的映射关系

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..logger import logger
 from .utils import VIDEO_SUFFIX
@@ -19,7 +19,7 @@ class AIProcessor:
         self,
         path: Path,
         anime_info: Dict,
-        confirm_retry: Optional[Callable[[str], bool]] = None,
+        confirm_retry: Optional[Callable[..., Any]] = None,
     ) -> Optional[AIAnalysisResult]:
         """
         使用AI分析动漫文件的映射关系

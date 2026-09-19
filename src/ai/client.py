@@ -1,5 +1,7 @@
+import re
 import json
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+from pydantic import ValidationError
 
 from ..logger import logger
 from .models import AIAnalysisResult
@@ -31,7 +33,7 @@ class AIClient:
         self,
         anime_info: Dict,
         local_files: List[Dict],
-        confirm_retry: Optional[Callable[[str], bool]] = None,
+        confirm_retry: Optional[Callable[..., Any]] = None,
     ) -> Optional[AIAnalysisResult]:
         """
         分析本地文件与TMDB剧集的映射关系
@@ -125,3 +127,148 @@ class AIClient:
             "你是一个专业的动漫文件重命名助手。你需要分析本地动漫文件与动漫数据库中剧集信息的对应关系，特别关注动漫BD发布与官方分季的差异。"
             + "请你只输出匹配到的季度和剧集信息，不要输出其他未匹配到的内容。"
         )
+
+    @staticmethod
+    def build_full_prompt(anime_info: Dict, local_files: List[Dict]) -> str:
+        """构建用于手动复制给外部AI的完整独立Prompt（包含系统设定、JSON Schema与用户数据）"""
+        system_prompt = AIClient.get_system_prompt()
+        schema = AIAnalysisResult.model_json_schema()
+        schema.pop("title", None)
+        schema.pop("description", None)
+        schema_str = json.dumps(schema, indent=2, ensure_ascii=False)
+
+        json_instructions = (
+            "请严格按照以下JSON Schema格式返回分析结果。不要添加任何额外的解释说明或无关文字，直接输出包含有效JSON的代码块：\n"
+            "```json\n"
+            f"{schema_str}\n"
+            "```"
+        )
+        base_prompt = AIClient.build_common_prompt(anime_info, local_files)
+        return f"{system_prompt}\n\n{json_instructions}\n\n{base_prompt}"
+
+    @staticmethod
+    def parse_manual_response(content: str) -> AIAnalysisResult:
+        """
+        从用户手动粘贴的内容中提取并验证 AIAnalysisResult。
+        支持纯 JSON、带 ```json ``` 标记的内容、外部AI思维链以及附加说明文字。
+        同时对常见大模型返回的轻微格式差异进行智能兼容与标准化。
+        """
+        if not content or not content.strip():
+            raise ValueError("输入内容为空")
+
+        cleaned = content.strip()
+
+        # 移除可能的思维链标记
+        thinking_patterns = [
+            r"<thinking>[\s\S]*?</thinking>",
+            r"思考：[\s\S]*?(?=\{)",
+            r"分析：[\s\S]*?(?=\{)",
+            r"推理：[\s\S]*?(?=\{)",
+        ]
+        for pattern in thinking_patterns:
+            cleaned = re.sub(pattern, "", cleaned)
+
+        cleaned = cleaned.strip()
+
+        candidates = []
+
+        # 1. 优先提取 markdown 代码块中的内容
+        code_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+        for cb in code_blocks:
+            cb_clean = cb.strip()
+            if cb_clean.startswith("{") and cb_clean.endswith("}"):
+                candidates.append(cb_clean)
+
+        # 2. 提取最外层从第一个 { 到最后一个 } 的内容
+        first_brace = cleaned.find("{")
+        last_brace = cleaned.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            outer = cleaned[first_brace : last_brace + 1].strip()
+            if outer not in candidates:
+                candidates.append(outer)
+
+        # 3. 原始清洗后的内容
+        if cleaned not in candidates:
+            candidates.append(cleaned)
+
+        last_json_error = None
+        last_validation_error = None
+
+        for cand in candidates:
+            try:
+                data = json.loads(cand)
+            except Exception as e:
+                last_json_error = e
+                continue
+
+            if not isinstance(data, dict):
+                last_json_error = "解析出的 JSON 不是字典对象"
+                continue
+
+            # 对常见模型的不规范输出进行智能容错与字段标准化
+            try:
+                # 兼容 file_mapping 字段名变体
+                if "file_mapping" not in data:
+                    if "episodes" in data and isinstance(data["episodes"], list):
+                        data["file_mapping"] = data.pop("episodes")
+                    elif "mapping" in data and isinstance(data["mapping"], list):
+                        data["file_mapping"] = data.pop("mapping")
+
+                # 兼容 reason
+                if "reason" not in data or not data["reason"]:
+                    data["reason"] = "用户手动提供外部 AI 识别结果"
+
+                # 兼容置信度格式
+                conf = data.get("confidence")
+                if isinstance(conf, str):
+                    conf_lower = conf.strip().lower()
+                    if conf_lower in ["high", "medium", "low"]:
+                        data["confidence"] = conf_lower.capitalize()
+                    else:
+                        data["confidence"] = "High" if data.get("file_mapping") else "Low"
+                elif isinstance(conf, (int, float)):
+                    if conf >= 0.8:
+                        data["confidence"] = "High"
+                    elif conf >= 0.5:
+                        data["confidence"] = "Medium"
+                    else:
+                        data["confidence"] = "Low"
+                else:
+                    data["confidence"] = "High" if data.get("file_mapping") else "Low"
+
+                # 规范化 file_mapping 中的每一项
+                if "file_mapping" in data and isinstance(data["file_mapping"], list):
+                    for item in data["file_mapping"]:
+                        if isinstance(item, dict):
+                            # 兼容文件路径键名
+                            if "file_path" not in item:
+                                for key in ["path", "original_path", "filename", "file"]:
+                                    if key in item and item[key]:
+                                        item["file_path"] = item[key]
+                                        break
+                            # 兼容季号与集号为字符串类型
+                            for k in ["tmdb_season", "tmdb_episode"]:
+                                if k in item and isinstance(item[k], str) and item[k].isdigit():
+                                    item[k] = int(item[k])
+                            # 兼容 item 内的 confidence
+                            if "confidence" in item and isinstance(item["confidence"], str):
+                                c_lower = item["confidence"].strip().lower()
+                                if c_lower in ["high", "medium", "low"]:
+                                    item["confidence"] = c_lower.capitalize()
+
+                    # 若存在有效的文件映射且不是低置信度，确保置信度为 High，保证直接用作识别信息
+                    if data["file_mapping"] and data["confidence"] != "Low":
+                        data["confidence"] = "High"
+
+                validated = AIAnalysisResult.model_validate(data)
+                return validated
+            except ValidationError as ve:
+                last_validation_error = ve
+            except Exception as e:
+                last_validation_error = e
+
+        if last_validation_error:
+            raise ValueError(f"JSON 结构验证未通过: {last_validation_error}")
+        raise ValueError(f"无法从输入内容中解析有效 JSON: {last_json_error}")
+
+

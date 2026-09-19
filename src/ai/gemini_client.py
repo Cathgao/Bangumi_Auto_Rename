@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from google import genai
 from pydantic import ValidationError
@@ -58,7 +58,7 @@ class GeminiClient(BaseAIClient):
         self,
         anime_info: Dict,
         local_files: List[Dict],
-        confirm_retry: Optional[Callable[[str], bool]] = None,
+        confirm_retry: Optional[Callable[..., Any]] = None,
     ) -> Optional[AIAnalysisResult]:
         """
         使用Gemini API分析本地文件与TMDB剧集的映射关系
@@ -82,6 +82,9 @@ class GeminiClient(BaseAIClient):
         try:
             # 导入AIClient以使用通用prompt方法
             from .client import AIClient
+
+            # 构建可供用户手动复制的全量Prompt（包含系统设定、JSON Schema、文件列表）
+            full_prompt = AIClient.build_full_prompt(anime_info, local_files)
 
             # 使用通用prompt构建基础内容
             base_prompt = AIClient.build_common_prompt(anime_info, local_files)
@@ -122,7 +125,17 @@ class GeminiClient(BaseAIClient):
                 except Exception as e:
                     logger.error(f"[Gemini识别] Gemini API调用失败: {e}")
                     if confirm_retry:
-                        choice = confirm_retry(str(e))
+                        choice = confirm_retry(str(e), prompt=full_prompt)
+                        if isinstance(choice, tuple) and choice[0] == "manual":
+                            logger.info(
+                                f"[Gemini识别] 用户手动提供了 AI 识别结果，置信度: {choice[1].confidence}"
+                            )
+                            return choice[1]
+                        if isinstance(choice, AIAnalysisResult):
+                            logger.info(
+                                f"[Gemini识别] 用户手动提供了 AI 识别结果，置信度: {choice.confidence}"
+                            )
+                            return choice
                         if choice is True or choice == "retry":
                             logger.info("[Gemini识别] 用户选择重试 Gemini API 调用，正在重新请求...")
                             time.sleep(1)
@@ -135,7 +148,17 @@ class GeminiClient(BaseAIClient):
                 if not response or not response.text:
                     logger.error("[Gemini识别] Gemini 响应内容为空")
                     if confirm_retry:
-                        choice = confirm_retry("Gemini 响应内容为空")
+                        choice = confirm_retry("Gemini 响应内容为空", prompt=full_prompt)
+                        if isinstance(choice, tuple) and choice[0] == "manual":
+                            logger.info(
+                                f"[Gemini识别] 用户手动提供了 AI 识别结果，置信度: {choice[1].confidence}"
+                            )
+                            return choice[1]
+                        if isinstance(choice, AIAnalysisResult):
+                            logger.info(
+                                f"[Gemini识别] 用户手动提供了 AI 识别结果，置信度: {choice.confidence}"
+                            )
+                            return choice
                         if choice is True or choice == "retry":
                             time.sleep(1)
                             continue
@@ -163,7 +186,17 @@ class GeminiClient(BaseAIClient):
                     logger.error(f"[Gemini识别] JSON解析失败: {e}")
                     logger.error(f"[Gemini识别] 原始响应: {response.text[:200]}...")
                     if confirm_retry:
-                        choice = confirm_retry(f"返回内容解析失败: {e}")
+                        choice = confirm_retry(f"返回内容解析失败: {e}", prompt=full_prompt)
+                        if isinstance(choice, tuple) and choice[0] == "manual":
+                            logger.info(
+                                f"[Gemini识别] 用户手动提供了 AI 识别结果，置信度: {choice[1].confidence}"
+                            )
+                            return choice[1]
+                        if isinstance(choice, AIAnalysisResult):
+                            logger.info(
+                                f"[Gemini识别] 用户手动提供了 AI 识别结果，置信度: {choice.confidence}"
+                            )
+                            return choice
                         if choice is True or choice == "retry":
                             time.sleep(1)
                             continue

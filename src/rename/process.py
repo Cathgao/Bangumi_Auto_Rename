@@ -3,7 +3,7 @@ import json
 import uuid
 from pathlib import Path
 from difflib import SequenceMatcher
-from typing import Callable, Dict, List, Tuple, Union, Optional
+from typing import Any, Callable, Dict, List, Tuple, Union, Optional
 
 from jikanpy import Jikan
 
@@ -224,7 +224,7 @@ class Rename:
         _tuuid: Optional[str] = None,
         cus_name: Optional[str] = None,
         cus_season_id: Optional[int] = None,
-        confirm_retry: Optional[Callable[[str], bool]] = None,
+        confirm_retry: Optional[Callable[..., Any]] = None,
         confirm_low_confidence: Optional[Callable[..., str]] = None,
     ):
         if path.is_dir():
@@ -414,7 +414,7 @@ class Rename:
         _tuuid: Optional[str] = None,
         cus_name: Optional[str] = None,
         cus_season_id: Optional[int] = None,
-        confirm_retry: Optional[Callable[[str], bool]] = None,
+        confirm_retry: Optional[Callable[..., Any]] = None,
         confirm_low_confidence: Optional[Callable[..., str]] = None,
     ):
         if _tuuid:
