@@ -25,6 +25,7 @@ from .cleaner import (
     extract_number,
     extract_season,
     remove_episode,
+    sanitize_name,
     extract_base_num,
     match_and_extract,
     remove_similar_part,
@@ -36,10 +37,14 @@ jikan = Jikan()
 
 class Rename:
     def __init__(self):
-        self.BANGUMI_PATH = Path(cm.get_config('bangumi_path'))
-        self.MOVIE_PATH = Path(cm.get_config('movie_path'))
-        self.ANIME_PATH = Path(cm.get_config('anime_path'))
-        self.ANIME_MOVIE_PATH = Path(cm.get_config('anime_movie_path'))
+        bgm_path = cm.get_config('bangumi_path') or cm.get_config('anime_path') or '.'
+        self.BANGUMI_PATH = Path(bgm_path)
+        movie_path = cm.get_config('movie_path') or '.'
+        self.MOVIE_PATH = Path(movie_path)
+        anime_path = cm.get_config('anime_path') or '.'
+        self.ANIME_PATH = Path(anime_path)
+        anime_movie_path = cm.get_config('anime_movie_path') or anime_path
+        self.ANIME_MOVIE_PATH = Path(anime_movie_path)
 
         self.ANIME_MOVIE_PATH.mkdir(parents=True, exist_ok=True)
         self.MOVIE_PATH.mkdir(parents=True, exist_ok=True)
@@ -590,7 +595,12 @@ class Rename:
                 or '2000-01-01'
             )
             first_year = first_data.split('-')[0]
-            work_path = _WORK_PATH / f'{name} ({first_year})'
+
+            # 【方案A：TMDB 统一剧集规范】
+            # 若该动画为多季剧集（第2季及以上），优先使用追溯得到的主系列第一季名称和首播年份作为大目录名称
+            series_name = info.get('series_name') or name
+            series_year = info.get('series_year') or first_year
+            work_path = _WORK_PATH / f'{sanitize_name(series_name)} ({series_year})'
 
             season_id = self.get_season_id(
                 info,
@@ -601,6 +611,29 @@ class Rename:
 
             if cus_season_id:
                 season_id = int(cus_season_id)
+
+            # 若通过 get_season_id 或自定义季号确定了季号大于 1，且此前尚未追溯到 series_name，进行补充追溯并更新 work_path
+            if (
+                season_id > 1
+                and not info.get('series_name')
+                and is_anime
+                and not is_movie
+            ):
+                subject_id = info.get('id')
+                if subject_id and hasattr(self.search.bangumi, 'get_root_series_info'):
+                    try:
+                        r_name, r_year = self.search.bangumi.get_root_series_info(subject_id)
+                        if r_name:
+                            series_name = r_name
+                            series_year = r_year or series_year
+                            info['series_name'] = series_name
+                            info['series_year'] = series_year
+                            work_path = _WORK_PATH / f'{sanitize_name(series_name)} ({series_year})'
+                            logger.info(
+                                f"[处理任务] 补充追溯主系列: 《{name}》 (第{season_id}季) -> 大目录《{series_name} ({series_year})》"
+                            )
+                    except Exception:
+                        pass
 
             # 【AI增强处理】
             # 如果是动漫且启用了AI，使用AI分析文件映射
@@ -650,6 +683,16 @@ class Rename:
                     self.R = self.ai_processor.apply_ai_mapping(
                         ai_result=ai_result, base_path=path, work_path=work_path
                     )
+                    # 如果AI分析成功且路径为文件夹，检查是否存在未匹配的核心视频文件并进行多独立条目级联处理
+                    if self.R and path.is_dir():
+                        self._process_residual_subjects(
+                            path=path,
+                            current_info=info,
+                            _WORK_PATH=_WORK_PATH,
+                            confirm_retry=confirm_retry,
+                            confirm_low_confidence=confirm_low_confidence,
+                            primary_work_path=work_path,
+                        )
                     # 如果AI没有返回任何有效映射，则弹窗询问用户而不是静默回退
                     if not self.R:
                         logger.warning(
@@ -809,6 +852,242 @@ class Rename:
                         work_path,
                         season_id,
                     )
+
+    def _process_residual_subjects(
+        self,
+        path: Path,
+        current_info: Dict[str, Any],
+        _WORK_PATH: Path,
+        confirm_retry: Optional[Callable[..., Any]] = None,
+        confirm_low_confidence: Optional[Callable[..., Any]] = None,
+        primary_work_path: Optional[Path] = None,
+    ):
+        """
+        处理单文件夹中包含多个独立条目的情况（级联未匹配文件识别）
+        """
+        if not path.is_dir() or not self.R:
+            return
+
+        all_video_files = self.ai_processor._collect_video_files(path)
+        mapped_source_files = {p.resolve() for p in self.R.keys()}
+        unmapped_videos = [
+            f for f in all_video_files if f.resolve() not in mapped_source_files
+        ]
+
+        if not unmapped_videos:
+            return
+
+        logger.info(
+            f"[多条目识别] 检测到首轮处理后仍有 {len(unmapped_videos)} 个未映射视频文件，检查是否存在多个独立条目..."
+        )
+
+        extra_pattern = re.compile(
+            r'(?<![a-zA-Z\u4e00-\u9fa5])(ncop|nced|menu|teaser|iv|cm|nc|pv|advice|trailer|event|fans|preview|picture drama|sp|special|特典|映像)(?:\d{1,3})?(?![a-zA-Z\u4e00-\u9fa5])',
+            re.IGNORECASE,
+        )
+
+        def is_extra_or_sp(f: Path) -> bool:
+            # 1. 检查路径是否在 IGNORE_DIR (如 CDs, scans, fonts 等)
+            if any(part.lower() in IGNORE_DIR for part in f.parts):
+                return True
+            # 2. 检查父级目录是否包含 sp, sps, special, specials, extra, extras, 特典 等
+            if any(
+                p.lower() in ["sp", "sps", "special", "specials", "extra", "extras", "特典"]
+                for p in f.parts[:-1]
+            ):
+                return True
+            # 3. 使用独立词/边界正则匹配特典标签 (避免误伤单词内部如 Unlimited, Spice, Charlotte 等)
+            if extra_pattern.search(f.name):
+                return True
+            return False
+
+        def has_core_videos(videos: List[Path]) -> bool:
+            for v in videos:
+                if not is_extra_or_sp(v):
+                    return True
+            return False
+
+        current_subject_id = current_info.get("id")
+        processed_subject_ids = {current_subject_id} if current_subject_id else set()
+
+        # 记录各目录对应的正片视频
+        work_path_core_files: Dict[Path, List[Path]] = {}
+        if primary_work_path:
+            work_path_core_files[primary_work_path] = [
+                f for f in all_video_files
+                if f.resolve() in mapped_source_files and not is_extra_or_sp(f)
+            ]
+
+        # 检查是否存在尚未映射的核心正片视频
+        core_unmapped = [v for v in unmapped_videos if not is_extra_or_sp(v)]
+
+        if core_unmapped:
+            logger.info(
+                f"[多条目识别] 检测到 {len(core_unmapped)} 个未映射的核心正片视频，尝试识别独立条目..."
+            )
+            for iteration in range(3):
+                if not core_unmapped:
+                    break
+
+                matched_subject_info = None
+                matched_subject_name = ""
+
+                # 策略1：优先从 Bangumi 动画关联条目中匹配
+                if current_info.get("source") == "bangumi" and current_subject_id:
+                    relations = self.search.bangumi.get_anime_relations(current_subject_id)
+                    avail_relations = [
+                        r for r in relations if r.get("id") not in processed_subject_ids
+                    ]
+                    best_rel = self.search.bangumi.match_relation_by_files(
+                        avail_relations, core_unmapped
+                    )
+                    if best_rel and best_rel.get("id"):
+                        rel_id = best_rel["id"]
+                        logger.info(
+                            f"[多条目识别] 命中关联条目: ID {rel_id} - 《{best_rel.get('name_cn') or best_rel.get('name')}》"
+                        )
+                        matched_subject_name, matched_subject_info = (
+                            self.search.search_bangumi(str(rel_id))
+                        )
+
+                # 策略2：若关联条目未命中，使用未匹配核心文件的清洗名称检索 (要求得分 >= 0.70)
+                if not matched_subject_name or not matched_subject_info:
+                    sample_file = core_unmapped[0]
+                    cleaned_q = remove_tag(sample_file.stem)
+                    cleaned_q = remove_season(cleaned_q)
+                    cleaned_q = remove_episode(cleaned_q).strip("! ")
+                    if cleaned_q:
+                        logger.info(f"[多条目识别] 尝试使用核心文件清洗名称检索: {cleaned_q}")
+                        cand_name, cand_info = self.search.search_bangumi(cleaned_q)
+                        if (
+                            cand_info
+                            and cand_info.get("id") not in processed_subject_ids
+                            and cand_info.get("score", 0) >= 0.70
+                        ):
+                            matched_subject_name = cand_name
+                            matched_subject_info = cand_info
+
+                if not matched_subject_name or not matched_subject_info:
+                    logger.info("[多条目识别] 未能为剩余核心文件找到高置信度匹配条目，终止级联识别")
+                    break
+
+                new_subject_id = matched_subject_info.get("id")
+                if new_subject_id:
+                    processed_subject_ids.add(new_subject_id)
+
+                first_data = (
+                    matched_subject_info.get("first_air_date")
+                    or matched_subject_info.get("release_date")
+                    or matched_subject_info.get("date")
+                    or "2000-01-01"
+                )
+                first_year = first_data.split("-")[0]
+                series_name = matched_subject_info.get("series_name") or matched_subject_name
+                series_year = matched_subject_info.get("series_year") or first_year
+                sanitized_subject_name = sanitize_name(series_name)
+                new_work_path = _WORK_PATH / f"{sanitized_subject_name} ({series_year})"
+                if new_work_path != primary_work_path:
+                    try:
+                        new_work_path.mkdir(parents=True, exist_ok=True)
+                    except Exception as e:
+                        logger.warning(f"[多条目识别] 预创建目录失败: {str(e)}")
+                    logger.info(
+                        f"[多条目识别] 为新条目《{matched_subject_name}》建立独立目录: {new_work_path.name}"
+                    )
+                else:
+                    logger.info(
+                        f"[多条目识别] 新条目《{matched_subject_name}》属于主系列《{series_name}》，合并入现有目录: {new_work_path.name}"
+                    )
+
+                matched_subject_info = self.search.fill_season_info(matched_subject_info)
+
+                try:
+                    ai_res = self.ai_processor.analyze_anime_files(
+                        path,
+                        matched_subject_info,
+                        confirm_retry=confirm_retry,
+                        video_files=core_unmapped,
+                    )
+                except Exception as e:
+                    logger.warning(f"[多条目识别] AI分析剩余文件失败: {str(e)}")
+                    break
+
+                confidence_threshold = (
+                    cm.get_config("ai_confidence_threshold") or "Medium"
+                )
+                should_use_ai = False
+                if ai_res:
+                    if confidence_threshold == "High" and ai_res.confidence == "High":
+                        should_use_ai = True
+                    elif confidence_threshold == "Medium" and ai_res.confidence in [
+                        "High",
+                        "Medium",
+                    ]:
+                        should_use_ai = True
+                    elif confidence_threshold == "Low":
+                        should_use_ai = True
+
+                if should_use_ai and ai_res:
+                    residual_mapping = self.ai_processor.apply_ai_mapping(
+                        ai_result=ai_res, base_path=path, work_path=new_work_path
+                    )
+                    if residual_mapping:
+                        self.R.update(residual_mapping)
+                        mapped_source_files.update(
+                            p.resolve() for p in residual_mapping.keys()
+                        )
+                        core_unmapped = [
+                            f for f in core_unmapped
+                            if f.resolve() not in mapped_source_files
+                        ]
+                        work_path_core_files.setdefault(new_work_path, []).extend([
+                            f for f in residual_mapping.keys()
+                            if f in all_video_files and not is_extra_or_sp(f)
+                        ])
+                        logger.info(
+                            f"[多条目识别] 新条目《{matched_subject_name}》成功映射 {len(residual_mapping)} 个文件"
+                        )
+                    else:
+                        break
+                else:
+                    break
+
+        # 特典/SP 归拢收尾：将所有未映射的 SP 文件直接分配至对应工作目录的 Season0
+        mapped_keys_set = set(self.R.keys())
+        remaining_sp_videos = [
+            f for f in all_video_files if f not in mapped_keys_set
+        ]
+        if remaining_sp_videos and primary_work_path:
+            logger.info(
+                f"[多条目识别] 对剩余 {len(remaining_sp_videos)} 个特典/SP文件进行归拢处理..."
+            )
+
+            sp_target_dir = primary_work_path / "Season0"
+            try:
+                sp_target_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"[多条目识别] 预创建特典目录失败: {str(e)}")
+
+            for sp_vid in remaining_sp_videos:
+                self.R[sp_vid] = sp_target_dir / sp_vid.name
+                logger.info(
+                    f"[多条目识别] 归拢特典: {sp_vid.name} -> {primary_work_path.name}/Season0"
+                )
+                vid_stem = sp_vid.stem
+                search_dirs = [sp_vid.parent]
+                for sub_name in ["Subs", "subs", "Subtitles", "subtitles"]:
+                    sub_dir = sp_vid.parent / sub_name
+                    if sub_dir.is_dir():
+                        search_dirs.append(sub_dir)
+
+                for d in search_dirs:
+                    for item in d.iterdir():
+                        if item.is_file() and item != sp_vid and item not in self.R:
+                            if item.name.startswith(f"{vid_stem}."):
+                                self.R[item] = sp_target_dir / item.name
+                                logger.info(
+                                    f"[多条目识别] 发现并映射特典关联文件: {item.name}"
+                                )
 
     def error_reply(
         self,

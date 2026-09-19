@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..logger import logger
-from .utils import VIDEO_SUFFIX
+from .utils import VIDEO_SUFFIX, IGNORE_DIR
 from ..ai.client import AIClient
 from ..ai.models import AIAnalysisResult
 from ..ai.video_analyzer import VideoAnalyzer
@@ -20,6 +20,7 @@ class AIProcessor:
         path: Path,
         anime_info: Dict,
         confirm_retry: Optional[Callable[..., Any]] = None,
+        video_files: Optional[List[Path]] = None,
     ) -> Optional[AIAnalysisResult]:
         """
         使用AI分析动漫文件的映射关系
@@ -28,6 +29,7 @@ class AIProcessor:
             path: 本地文件路径
             anime_info: TMDB/Bangumi动漫信息
             confirm_retry: API报错时的重试确认回调
+            video_files: 指定待分析的视频文件列表（若为None则自动扫描path下的全部视频）
 
         Returns:
             验证后的AI分析结果
@@ -37,7 +39,8 @@ class AIProcessor:
             return None
 
         # 收集视频文件
-        video_files = self._collect_video_files(path)
+        if video_files is None:
+            video_files = self._collect_video_files(path)
         if not video_files:
             logger.warning("[AI处理] 未找到视频文件")
             return None
@@ -118,7 +121,10 @@ class AIProcessor:
                 else:
                     target_dir = work_path / f"Season{tmdb_season}"
 
-                target_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    logger.warning(f"[AI处理] 预创建目录失败: {str(e)}")
 
                 # 生成新的文件名
                 if episode_type in ["special", "ova"]:
@@ -177,6 +183,12 @@ class AIProcessor:
         else:
             for item in path.rglob("*"):
                 if item.is_file() and item.suffix.lower() in VIDEO_SUFFIX:
+                    try:
+                        rel_parts = [p.lower() for p in item.relative_to(path).parts[:-1]]
+                        if any(p in IGNORE_DIR for p in rel_parts):
+                            continue
+                    except ValueError:
+                        pass
                     video_files.append(item)
 
         return sorted(video_files)

@@ -1,6 +1,7 @@
 import re
 import time
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -180,6 +181,153 @@ class BangumiAPI:
             return res
         return []
 
+    def get_anime_relations(self, subject_id: int) -> List[Dict[str, Any]]:
+        """获取与指定条目关联的动画类条目（排除原声集、书籍等衍生品）"""
+        relations = self.get_relations(subject_id)
+        anime_relations = []
+        for item in relations:
+            if not isinstance(item, dict):
+                continue
+            sub_type = item.get("type")
+            rel_type = str(item.get("relation", ""))
+            # 过滤明确非动画的条目（如书籍、原声集、三次元、游戏、画集、广播剧）
+            if rel_type in ["书籍", "原声集", "三次元", "游戏", "画集", "广播剧"]:
+                continue
+            if sub_type == 2 or (
+                sub_type is None
+                and rel_type in ["续集", "前传", "番外篇", "主线故事", "不同演绎", "其他"]
+            ):
+                anime_relations.append(item)
+        return anime_relations
+
+    def get_root_series_info(self, subject_id: int) -> Tuple[str, str]:
+        """
+        通过 Bangumi 前传关系链，追溯多季动画的主系列第一季名称和首播年份。
+        返回: (root_name, root_year)
+        若无法追溯或无前传，返回 ("", "")
+        """
+        if not hasattr(self, "_root_series_cache"):
+            self._root_series_cache: Dict[int, Tuple[str, str]] = {}
+
+        if subject_id in self._root_series_cache:
+            return self._root_series_cache[subject_id]
+
+        curr_id = subject_id
+        visited = {curr_id}
+        curr_info = self.get_subject(curr_id)
+        if not curr_info:
+            return "", ""
+
+        root_info = curr_info
+        max_depth = 8
+        depth = 0
+        while depth < max_depth:
+            depth += 1
+            relations = self.get_anime_relations(curr_id)
+            prequels = [r for r in relations if r.get("relation") == "前传"]
+            if not prequels:
+                break
+
+            # 优先寻找同属 TV 平台的前传条目
+            next_id = None
+            next_sub = None
+            for p in prequels:
+                p_id = p.get("id")
+                if not p_id or p_id in visited:
+                    continue
+                p_sub = self.get_subject(p_id)
+                if p_sub and "tv" in str(p_sub.get("platform", "")).lower():
+                    next_id = p_id
+                    next_sub = p_sub
+                    break
+
+            # 若无明确 TV 前传，使用首个未访问的前传
+            if not next_id:
+                for p in prequels:
+                    p_id = p.get("id")
+                    if p_id and p_id not in visited:
+                        next_id = p_id
+                        next_sub = self.get_subject(p_id)
+                        break
+
+            if not next_id or not next_sub:
+                break
+
+            visited.add(next_id)
+            curr_id = next_id
+            root_info = next_sub
+
+        root_name = root_info.get("name_cn") or root_info.get("name") or ""
+        date_str = root_info.get("date") or ""
+        root_year = date_str.split("-")[0] if date_str else ""
+
+        result = (root_name, root_year)
+        self._root_series_cache[subject_id] = result
+        return result
+
+    def match_relation_by_files(
+        self, relations: List[Dict[str, Any]], unmapped_files: List[Path]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        根据未映射文件的文件名特征，在关联条目列表中匹配最符合的条目
+        """
+        if not relations or not unmapped_files:
+            return None
+
+        from .cleaner import remove_tag, remove_season, remove_episode
+
+        clean_stems: List[str] = []
+        raw_names: List[str] = []
+        for f in unmapped_files:
+            raw_names.append(f.name)
+            s = remove_tag(f.stem)
+            s = remove_season(s)
+            s = remove_episode(s).strip("! ")
+            if s:
+                clean_stems.append(s)
+
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for rel in relations:
+            rel_name = rel.get("name", "")
+            rel_name_cn = rel.get("name_cn", "")
+            candidates = [rel_name, rel_name_cn]
+            score = 0.0
+
+            for name_cand in candidates:
+                if not name_cand:
+                    continue
+                name_cand_lower = name_cand.lower()
+
+                # 特殊符号匹配增强（如 Nachuyachumi!+ 中的 "+"）
+                if "+" in name_cand_lower and any("+" in fn for fn in raw_names):
+                    score += 0.5
+
+                for stem in clean_stems:
+                    stem_lower = stem.lower()
+                    if stem_lower in name_cand_lower or name_cand_lower in stem_lower:
+                        ratio = len(min(stem_lower, name_cand_lower, key=len)) / max(
+                            len(max(stem_lower, name_cand_lower, key=len)), 1
+                        )
+                        score = max(score, max(ratio, 0.7))
+                    else:
+                        sim = SequenceMatcher(None, stem_lower, name_cand_lower).ratio()
+                        score = max(score, sim)
+
+            if score > 0.35:
+                scored.append((score, rel))
+
+        if not scored:
+            return None
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_rel = scored[0]
+        logger.info(
+            f"[Bangumi 关联] 根据未匹配文件成功匹配关联条目: "
+            f"《{best_rel.get('name_cn') or best_rel.get('name')}》 (ID: {best_rel.get('id')}, 得分: {best_score:.2f})"
+        )
+        return best_rel
+
+
     @staticmethod
     def _extract_aliases(subject: Dict[str, Any]) -> List[str]:
         """从 infobox 提取别名与中文名"""
@@ -203,13 +351,19 @@ class BangumiAPI:
         return aliases
 
     def _calc_similarity(self, query: str, subject: Dict[str, Any]) -> float:
-        """计算查询词与条目的最大相似度"""
+        """计算查询词与条目的最大相似度，惩罚缺少关键副标题词条的候选项"""
         q_lower = query.lower()
         candidates = [
             subject.get("name_cn", ""),
             subject.get("name", ""),
         ]
         candidates.extend(self._extract_aliases(subject))
+
+        stopwords = {
+            'the', 'a', 'an', 'of', 'and', 'in', 'on', 'at', 'to', 'for', 'with', 'by',
+            'wa', 'ga', 'no', 'wo', 'ni', 'de', 'to', 'ha', 'na', 'mo', 'o', 'ka', 'desu', 'da'
+        }
+        q_words = [w for w in re.findall(r'[\w]+', q_lower) if w not in stopwords and len(w) >= 2]
 
         max_ratio = 0.0
         for cand in candidates:
@@ -218,14 +372,26 @@ class BangumiAPI:
             cand_lower = cand.lower()
             if q_lower == cand_lower:
                 return 1.0
+
+            cand_words = set(re.findall(r'[\w]+', cand_lower))
+            missing_words = [w for w in q_words if w not in cand_words]
+
             if q_lower in cand_lower or cand_lower in q_lower:
-                # 包含关系赋较高权重
-                ratio = len(min(q_lower, cand_lower, key=len)) / len(
-                    max(q_lower, cand_lower, key=len)
+                coverage = len(min(q_lower, cand_lower, key=len)) / max(
+                    len(max(q_lower, cand_lower, key=len)), 1
                 )
-                ratio = max(ratio, 0.85)
+                if coverage >= 0.7 and not missing_words:
+                    ratio = max(coverage, 0.85)
+                else:
+                    ratio = coverage
             else:
                 ratio = SequenceMatcher(None, q_lower, cand_lower).ratio()
+
+            # 若候选标题缺少查询中的关键副标题词汇（例如 BLOOM, Nachuyachumi, Alicization 等），进行惩罚
+            if missing_words:
+                penalty = 0.25 * len(missing_words)
+                ratio = max(0.0, ratio - penalty)
+
             if ratio > max_ratio:
                 max_ratio = ratio
 
@@ -254,6 +420,47 @@ class BangumiAPI:
             return "", None
 
         search_query = query.strip()
+        # 支持纯数字 ID 直通查询
+        if search_query.isdigit():
+            subject_id = int(search_query)
+            detailed = self.get_subject(subject_id)
+            if detailed:
+                detected_season = extract_season(
+                    detailed.get("name_cn") or detailed.get("name") or ""
+                )
+                if detected_season <= 0:
+                    for alias in self._extract_aliases(detailed):
+                        s = extract_season(alias)
+                        if s > 0:
+                            detected_season = s
+                            break
+                final_season = (
+                    season_number
+                    if season_number > 1
+                    else (detected_season if detected_season > 0 else 1)
+                )
+                info = self.build_anime_info(
+                    detailed, season_number=final_season, is_movie=is_movie
+                )
+                name = info["name"]
+                if final_season > 1 and not info.get("is_movie"):
+                    try:
+                        root_name, root_year = self.get_root_series_info(subject_id)
+                        if root_name:
+                            info["series_name"] = root_name
+                            info["series_year"] = root_year
+                            logger.info(
+                                f"[Bangumi 搜索] 多季动画主系列追溯: 《{name}》 (第{final_season}季) -> 主系列《{root_name}》 ({root_year})"
+                            )
+                    except Exception as e:
+                        logger.debug(f"[Bangumi 搜索] 追溯主系列失败: {str(e)}")
+                logger.info(
+                    f"[Bangumi 搜索] 数字ID直通匹配: 《{name}》 (ID: {subject_id})"
+                )
+                return name, info
+            else:
+                logger.warning(f"[Bangumi 搜索] 数字ID {subject_id} 未查询到有效条目")
+
         # 如果提供了特定季号 (>1) 且查询词中没有季信息，尝试添加季关键词
         queries_to_try = [search_query]
         if season_number > 1 and extract_season(search_query) == -1:
@@ -319,10 +526,32 @@ class BangumiAPI:
         detected_season = extract_season(
             best_item.get("name_cn") or best_item.get("name") or ""
         )
+        if detected_season <= 0:
+            for alias in self._extract_aliases(best_item):
+                s = extract_season(alias)
+                if s > 0:
+                    detected_season = s
+                    break
+
         final_season = season_number if season_number > 1 else (detected_season if detected_season > 0 else 1)
 
         info = self.build_anime_info(best_item, season_number=final_season, is_movie=is_movie)
+        info["score"] = best_score
         name = info["name"]
+
+        # 当为电视剧且季号大于 1 时，追溯第一季/主系列条目信息供目录归拢
+        if final_season > 1 and not info.get("is_movie"):
+            try:
+                root_name, root_year = self.get_root_series_info(subject_id)
+                if root_name:
+                    info["series_name"] = root_name
+                    info["series_year"] = root_year
+                    logger.info(
+                        f"[Bangumi 搜索] 多季动画主系列追溯: 《{name}》 (第{final_season}季) -> 主系列《{root_name}》 ({root_year})"
+                    )
+            except Exception as e:
+                logger.debug(f"[Bangumi 搜索] 追溯主系列失败: {str(e)}")
+
         logger.info(
             f"[Bangumi 搜索] 成功匹配: 《{name}》 (ID: {subject_id}, 得分: {best_score:.2f})"
         )

@@ -147,6 +147,17 @@ def remove_episode(s: str):
     return s.strip()
 
 
+def sanitize_name(name: str) -> str:
+    """
+    清理文件名/目录名中的非法字符（如 Windows 下的 \\ / : * ? " < > | 等），避免创建目录失败
+    """
+    if not name:
+        return ""
+    cleaned = re.sub(r'[\\/:*?"<>|]', ' ', name)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip('. ')
+    return cleaned
+
+
 def is_chinese_percentage_sufficient(text: str):
     '''
     用于判断字符串中 中文字符的比例是否至少占 25%
@@ -165,6 +176,8 @@ def extract_season(text: str):
     '''
     用于提取字符串中的 季 信息
     '''
+    if not text:
+        return -1
 
     # 匹配 第1季, 第二季 等
     match = re.search(r'第([\d一二三四五六七八九零]{1,2})(季|部分|部)', text)
@@ -181,18 +194,25 @@ def extract_season(text: str):
                     season_number += _a
             return season_number
 
+    # 匹配动漫常见的标点符号季号（如点兔？？、点兔？？？、WORKING!!、WORKING!!!、摇曳百合♪♪）
+    punc_match = re.search(r'([？?]{2,3}|[!！]{2,3}|♪{2,3})', text)
+    if punc_match:
+        return len(punc_match.group(1))
+
     for p in season_partten:
-        match = re.search(p, text)
+        match = re.search(p, text, re.IGNORECASE)
         if match:
             if p == r'(First|Second|Third|Fourth|Fifth) Season':
                 return NUM_MAP.get(match.group(1), 1)
             elif p == r'第([\d一二三四五六七八九零]{1,2})(季|部分|部)':
                 continue
             elif p == r' (I{2,3})' or p == r' (I{1,3}V)' or p == r' (VI{2,3})':
-                return ROMA_MAP.get(match.group(1), 1)
+                return ROMA_MAP.get(match.group(1).upper(), 1)
             else:
-                if match:
+                try:
                     return int(match.group(1))
+                except (ValueError, IndexError):
+                    pass
 
     # 未找到匹配项
     return -1

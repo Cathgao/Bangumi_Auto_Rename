@@ -23,13 +23,213 @@ class Search:
         is_movie: Optional[bool] = None,
         season_number: int = 1,
     ) -> tuple[str, Optional[Dict[str, Any]]]:
-        """使用 Bangumi 搜索动画信息"""
-        return self.bangumi.search_anime(
-            query=query,
+        """使用 Bangumi 搜索动画信息，支持英文/罗马音自动通过 TMDB 反查别名"""
+        if not query or not query.strip():
+            return "", None
+
+        search_query = query.strip()
+
+        # 纯数字 ID 直通查询
+        if search_query.isdigit():
+            return self.bangumi.search_anime(
+                query=search_query,
+                year=year,
+                is_movie=is_movie,
+                season_number=season_number,
+            )
+
+        clean_query = re.sub(r'[？!！:：·・/]', ' ', search_query).strip()
+        clean_query = re.sub(r'\s+', ' ', clean_query)
+
+        # 1. 尝试直接查询
+        name, info = self.bangumi.search_anime(
+            query=search_query,
             year=year,
             is_movie=is_movie,
             season_number=season_number,
         )
+        if not name and clean_query != search_query:
+            name, info = self.bangumi.search_anime(
+                query=clean_query,
+                year=year,
+                is_movie=is_movie,
+                season_number=season_number,
+            )
+
+        # 如果直接查询匹配度极高(>=0.95)或查询词已为中文且匹配成功，直接返回
+        if name and info:
+            if is_chinese_percentage_sufficient(search_query) or info.get("score", 0) >= 0.95:
+                return name, info
+
+        # 2. 如果非中文（英文/罗马音）或直接查询未匹配到结果，使用 TMDB 反查官方中文/日文标题并精确识别季度
+        resolved_candidates: List[Tuple[str, int]] = []
+        if not is_chinese_percentage_sufficient(search_query) or not name:
+            if self.TMDB_KEY:
+                stopwords = {
+                    'the', 'a', 'an', 'of', 'and', 'in', 'on', 'at', 'to', 'for', 'with', 'by',
+                    'wa', 'ga', 'no', 'wo', 'ni', 'de', 'to', 'ha', 'na', 'mo', 'o', 'ka', 'desu', 'da'
+                }
+                q_tokens = set(
+                    w.lower() for w in re.findall(r'[\w]+', clean_query)
+                    if w.lower() not in stopwords and len(w) >= 2
+                )
+
+                try:
+                    s = tmdb.Search()
+                    specific_candidates: List[Tuple[str, int]] = []
+                    base_candidates: List[Tuple[str, int]] = []
+
+                    def _search_movie():
+                        try:
+                            res_m = s.movie(query=clean_query, language="zh-CN")
+                            for item in res_m.get("results", [])[:3]:
+                                t = item.get("title")
+                                ot = item.get("original_title")
+                                if t and (t, 1) not in specific_candidates:
+                                    specific_candidates.append((t, 1))
+                                if ot and (ot, 1) not in specific_candidates:
+                                    specific_candidates.append((ot, 1))
+                        except Exception:
+                            pass
+
+                    tmdb_tv_meta: Dict[str, str] = {}
+
+                    def _search_tv():
+                        try:
+                            res_tv = s.tv(query=clean_query, language="zh-CN")
+                            for item in res_tv.get("results", [])[:3]:
+                                tv_id = item.get("id")
+                                name_cn = item.get("name", "")
+                                name_orig = item.get("original_name", "")
+                                if name_cn and not tmdb_tv_meta:
+                                    tmdb_tv_meta["series_name"] = name_cn
+                                    first_air = item.get("first_air_date", "")
+                                    if first_air:
+                                        tmdb_tv_meta["series_year"] = first_air.split("-")[0]
+
+                                # 获取季度列表
+                                try:
+                                    tv = tmdb.TV(tv_id)
+                                    info_zh = tv.info(language="zh-CN")
+                                    info_en = tv.info()
+                                    seasons_zh = {
+                                        s.get("season_number"): s.get("name", "")
+                                        for s in info_zh.get("seasons", [])
+                                    }
+                                    seasons_en = {
+                                        s.get("season_number"): s.get("name", "")
+                                        for s in info_en.get("seasons", [])
+                                    }
+                                except Exception:
+                                    seasons_zh = {}
+                                    seasons_en = {}
+
+                                # 计算每个词在各季度中出现的频次（用于逆季度词频 IDF 评分）
+                                season_token_counts: Dict[str, int] = {}
+                                season_tokens_map: Dict[int, set] = {}
+                                for sn in seasons_zh.keys():
+                                    if sn == 0:
+                                        continue
+                                    s_zh = seasons_zh.get(sn, "")
+                                    s_en = seasons_en.get(sn, "")
+                                    s_text = f"{s_zh} {s_en}".lower()
+                                    toks = set(re.findall(r'[\w]+', s_text)) - stopwords
+                                    season_tokens_map[sn] = toks
+                                    for tok in toks:
+                                        season_token_counts[tok] = season_token_counts.get(tok, 0) + 1
+
+                                # 对各季度与查询词进行匹配打分
+                                scored_seasons = []
+                                for sn, toks in season_tokens_map.items():
+                                    score = 0.0
+                                    matched_toks = toks.intersection(q_tokens)
+                                    for tok in matched_toks:
+                                        freq = season_token_counts.get(tok, 1)
+                                        score += 10.0 / freq
+                                    if (
+                                        season_number > 1
+                                        and sn == season_number
+                                        and score == 0.0
+                                    ):
+                                        score = 5.0
+                                    if score > 0.0:
+                                        scored_seasons.append(
+                                            (score, sn, seasons_zh.get(sn, ""), seasons_en.get(sn, ""))
+                                        )
+
+                                scored_seasons.sort(key=lambda x: x[0], reverse=True)
+
+                                # 将得分最高的特定季度标题作为最优先候选项
+                                for score, sn, s_zh, s_en in scored_seasons:
+                                    if s_zh and (s_zh, sn) not in specific_candidates:
+                                        specific_candidates.append((s_zh, sn))
+                                    if s_en and (s_en, sn) not in specific_candidates:
+                                        specific_candidates.append((s_en, sn))
+
+                                # 提取查询中未被剧集基础名涵盖的副标题词，组合成新候选项
+                                base_text = f"{name_cn} {name_orig}".lower()
+                                extra_q_tokens = [t for t in q_tokens if t not in base_text]
+                                if extra_q_tokens:
+                                    extra_str = " ".join(extra_q_tokens)
+                                    if name_cn:
+                                        combo_cn = f"{name_cn} {extra_str}"
+                                        if (combo_cn, season_number) not in specific_candidates:
+                                            specific_candidates.append((combo_cn, season_number))
+                                    if name_orig:
+                                        combo_orig = f"{name_orig} {extra_str}"
+                                        if (combo_orig, season_number) not in specific_candidates:
+                                            specific_candidates.append((combo_orig, season_number))
+
+                                # 基础电视剧标题作为兜底候选项
+                                if name_cn and (name_cn, season_number) not in base_candidates:
+                                    base_candidates.append((name_cn, season_number))
+                                if name_orig and (name_orig, season_number) not in base_candidates:
+                                    base_candidates.append((name_orig, season_number))
+                        except Exception as e:
+                            logger.debug(f"[Bangumi 搜索] TMDB TV 检索异常: {str(e)}")
+
+                    if is_movie is True:
+                        _search_movie()
+                        _search_tv()
+                    else:
+                        _search_tv()
+                        _search_movie()
+
+                    for c in specific_candidates:
+                        if c not in resolved_candidates:
+                            resolved_candidates.append(c)
+                    for c in base_candidates:
+                        if c not in resolved_candidates:
+                            resolved_candidates.append(c)
+
+                except Exception as e:
+                    logger.warning(f"[Bangumi 搜索] TMDB 译名反查失败: {str(e)}")
+
+        if resolved_candidates:
+            cand_titles = [c[0] for c in resolved_candidates]
+            logger.info(f"[Bangumi 搜索] 英文/罗马音反查候选标题: {cand_titles}")
+            for q_res, q_season in resolved_candidates:
+                r_name, r_info = self.bangumi.search_anime(
+                    query=q_res,
+                    year=year,
+                    is_movie=is_movie,
+                    season_number=q_season,
+                )
+                if r_name and r_info:
+                    if tmdb_tv_meta and not r_info.get("series_name"):
+                        r_info["series_name"] = tmdb_tv_meta["series_name"]
+                        if "series_year" in tmdb_tv_meta:
+                            r_info["series_year"] = tmdb_tv_meta["series_year"]
+                    logger.info(
+                        f"[Bangumi 搜索] 通过反查标题《{q_res}》成功匹配: 《{r_name}》 (ID: {r_info.get('id')})"
+                    )
+                    return r_name, r_info
+
+        # 如果反查未获得更优结果，回退使用原始查询结果
+        if name and info:
+            return name, info
+
+        return "", None
 
     def get_season_info(
         self, tv_id: int, season_number: int
