@@ -141,71 +141,79 @@ class Rename:
         n_item_name_l = item_name.replace(itme_path_main_name, '').lower()
         logger.info(f'[处理任务] 移去主要内容后的文件名Lower：{n_item_name_l}')
 
+        # 1. 检查是否处于被忽略的文件夹中（例如 Scans, CDs, Fonts 等）
         for ignore_dir in IGNORE_DIR:
-            if ignore_dir in item_path.name:
-                logger.info(f'[处理任务] 忽略文件夹：{item_path.name}')
+            if any(ignore_dir.lower() in part.lower() for part in item_path.parts):
+                logger.info(f'[处理任务] 处于忽略目录中，忽略文件：{item_path.name}')
+                return
+
+        # 2. 检查后缀是否在忽略后缀中
+        for ignore_tag in IGNORE_SUFFIX:
+            if ignore_tag.lower() == item_suffix:
+                logger.info(f'[处理任务] 忽略文件：{item_path.name}')
+                return
+
+        # 3. 严格校验媒体格式：只对视频文件与常见字幕文件处理，其它未知格式一律忽略
+        valid_media_suffixes = set(VIDEO_SUFFIX) | {'.ass', '.srt', '.ssa', '.sub', '.vtt'}
+        if item_suffix not in valid_media_suffixes:
+            logger.info(f'[处理任务] 非视频/字幕媒体文件，忽略：{item_path.name}')
+            return
+
+        p = r'[a-zA-Z\u4e00-\u9fa5]'
+        for ex in EXTRA_TAG:
+            if re.search(
+                rf'(?<!{p}){ex.lower()}(?!{p})',
+                n_item_name_l,
+            ):
+                t = work_path / 'extra'
+                self.R[item_path] = t / item_name
+                logger.info(
+                    f'[处理任务] 识别{n_item_name_l},'
+                    f'移动到extra文件夹：{item_path.name}'
+                )
                 break
         else:
-            for ignore_tag in IGNORE_SUFFIX:
-                if ignore_tag in item_suffix:
-                    logger.info(f'[处理任务] 忽略文件：{item_path.name}')
+            for s0 in S0_TAG:
+                if re.search(rf'{s0.lower()}[\d]{{0,3}}', item_name_l):
+                    t = work_path / 'Season0'
+                    self.R[item_path] = t / item_name
+                    logger.info(
+                        f'[处理任务] 识别{n_item_name_l},'
+                        f'移动到Season0文件夹：{item_path.name}'
+                    )
                     break
             else:
-                p = r'[a-zA-Z\u4e00-\u9fa5]'
-                for ex in EXTRA_TAG:
-                    if re.search(
-                        rf'(?<!{p}){ex.lower()}(?!{p})',
-                        n_item_name_l,
-                    ):
-                        t = work_path / 'extra'
-                        self.R[item_path] = t / item_name
-                        logger.info(
-                            f'[处理任务] 识别{n_item_name_l},'
-                            f'移动到extra文件夹：{item_path.name}'
-                        )
-                        break
+                _item_name = remove_code(remove_season(item_name_l))
+                logger.info(
+                    f'[处理任务] 开始对{_item_name}处理, 寻找集数中...")'
+                )
+                epp = extract_base_num(_item_name)
+                if epp is None:
+                    ep = extract_number(_item_name)
                 else:
-                    for s0 in S0_TAG:
-                        if re.search(rf'{s0.lower()}[\d]{{0,3}}', item_name_l):
-                            t = work_path / 'Season0'
-                            self.R[item_path] = t / item_name
-                            logger.info(
-                                f'[处理任务] 识别{n_item_name_l},'
-                                f'移动到Season0文件夹：{item_path.name}'
-                            )
-                            break
+                    ep = int(epp)
+
+                if ep is None:
+                    if _item_name.isdigit():
+                        ep = int(_item_name)
                     else:
-                        _item_name = remove_code(remove_season(item_name_l))
-                        logger.info(
-                            f'[处理任务] 开始对{_item_name}处理, 寻找集数中...")'
-                        )
-                        epp = extract_base_num(_item_name)
-                        if epp is None:
-                            ep = extract_number(_item_name)
-                        else:
-                            ep = int(epp)
+                        season_id = 0
+                        ep = 0
+                else:
+                    ep = int(ep)
 
-                        if ep is None:
-                            if _item_name.isdigit():
-                                ep = int(_item_name)
-                            else:
-                                season_id = 0
-                                ep = 0
-                        else:
-                            ep = int(ep)
+                _idata = match_and_extract(item_name)
+                if _idata:
+                    season_id, ep = _idata[0], _idata[1]
 
-                        _idata = match_and_extract(item_name)
-                        if _idata:
-                            season_id, ep = _idata[0], _idata[1]
+                t = work_path / f'Season{season_id}'
 
-                        t = work_path / f'Season{season_id}'
-
-                        ep = f'0{ep}' if ep < 10 else ep
-                        s = f'0{int(season_id)}'
-                        ss = s if season_id < 10 else int(season_id)
-                        t.mkdir(parents=True, exist_ok=True)
-                        ft = f'S{ss}E{ep}'
-                        self.R[item_path] = t / f'{ft} - {item_name}'
+                ep = f'0{ep}' if ep < 10 else ep
+                s = f'0{int(season_id)}'
+                ss = s if season_id < 10 else int(season_id)
+                t.mkdir(parents=True, exist_ok=True)
+                ft = f'S{ss}E{ep}'
+                self.R[item_path] = t / f'{ft} - {item_name}'
         logger.info(f'[处理任务] 处理完成{item_name}')
 
     def process(
@@ -778,8 +786,14 @@ class Rename:
             for item_path in path.iterdir():
                 logger.info(f"[处理任务] 处理嵌套文件夹 {item_path.name}")
                 if item_path.is_dir():
+                    # 检查是否为忽略的子文件夹（如 Scans, CDs, Fonts 等）
+                    if any(ig.lower() in item_path.name.lower() for ig in IGNORE_DIR):
+                        logger.info(f"[处理任务] 忽略文件夹：{item_path.name}")
+                        continue
                     repeat_2 = find_unique_parts_in_videos(item_path)
                     for sub_item in item_path.iterdir():
+                        if sub_item.is_dir():
+                            continue
                         self.process_sub(
                             rtpath_name,
                             repeat_2,

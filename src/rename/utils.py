@@ -1,5 +1,10 @@
-IGNORE_DIR = ['cd', 'scan']
-IGNORE_SUFFIX = ['.rar', '.zip', '.7z', '.webp', '.jpg', '.png']
+IGNORE_DIR = ['cd', 'cds', 'scan', 'scans', 'font', 'fonts', 'other', 'others', 'info', 'sample', 'samples']
+IGNORE_SUFFIX = [
+    '.rar', '.zip', '.7z', '.tar', '.gz',
+    '.webp', '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff', '.heic',
+    '.cue', '.flac', '.ape', '.wav', '.mp3', '.aac', '.ogg', '.m4a',
+    '.txt', '.nfo', '.log', '.torrent', '.dlog', '.md5', '.sha1', '.sfv',
+]
 EXTRA_TAG = [
     'NCOP',
     'NCED',
