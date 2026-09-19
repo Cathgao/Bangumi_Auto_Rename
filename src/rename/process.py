@@ -217,6 +217,7 @@ class Rename:
         cus_name: Optional[str] = None,
         cus_season_id: Optional[int] = None,
         confirm_retry: Optional[Callable[[str], bool]] = None,
+        confirm_low_confidence: Optional[Callable[..., str]] = None,
     ):
         if path.is_dir():
             is_video = False
@@ -233,6 +234,7 @@ class Rename:
                     cus_name,
                     cus_season_id,
                     confirm_retry=confirm_retry,
+                    confirm_low_confidence=confirm_low_confidence,
                 )
             else:
                 last_res = None
@@ -245,6 +247,7 @@ class Rename:
                         cus_name,
                         cus_season_id,
                         confirm_retry=confirm_retry,
+                        confirm_low_confidence=confirm_low_confidence,
                     )
                     if isinstance(last_res, str) and last_res == "任务已终止":
                         return last_res
@@ -258,6 +261,7 @@ class Rename:
                 cus_name,
                 cus_season_id,
                 confirm_retry=confirm_retry,
+                confirm_low_confidence=confirm_low_confidence,
             )
 
     def check_task_type(
@@ -403,6 +407,7 @@ class Rename:
         cus_name: Optional[str] = None,
         cus_season_id: Optional[int] = None,
         confirm_retry: Optional[Callable[[str], bool]] = None,
+        confirm_low_confidence: Optional[Callable[..., str]] = None,
     ):
         if _tuuid:
             _uuid = _tuuid
@@ -637,19 +642,89 @@ class Rename:
                     self.R = self.ai_processor.apply_ai_mapping(
                         ai_result=ai_result, base_path=path, work_path=work_path
                     )
-                    # 如果AI没有返回任何有效映射，则回退到传统方法
+                    # 如果AI没有返回任何有效映射，则弹窗询问用户而不是静默回退
                     if not self.R:
                         logger.warning(
-                            "[处理任务] AI未返回有效映射，回退到传统方法处理"
+                            f"[处理任务] AI未返回任何有效文件映射: {path.name}"
                         )
+                        user_choice = "skip"
+                        if confirm_low_confidence:
+                            user_choice = confirm_low_confidence(
+                                anime_name=name,
+                                path_name=path.name,
+                                confidence=ai_result.confidence,
+                                threshold=confidence_threshold,
+                                reason=ai_result.reason or "AI分析未生成有效文件映射",
+                                extra_notes=ai_result.extra_notes,
+                            )
+                        if user_choice == "fallback":
+                            logger.info("[处理任务] 用户选择回退传统方法处理")
+                            self._process_traditional(
+                                path, rtpath_name, work_path, season_id
+                            )
+                        elif user_choice == "abort":
+                            logger.info(f"[处理任务] 用户选择终止任务: {path.name}")
+                            return self.error_reply(
+                                _uuid,
+                                "任务已终止",
+                                path,
+                                is_anime,
+                                is_movie,
+                                name,
+                                season_id,
+                            )
+                        else:
+                            logger.info(f"[处理任务] 跳过未建立有效映射的项目: {path.name}")
+                            return self.error_reply(
+                                _uuid,
+                                f"[AI警告] 未能建立有效映射，已跳过: {path.name}",
+                                path,
+                                is_anime,
+                                is_movie,
+                                name,
+                                season_id,
+                            )
+                elif ai_result:
+                    logger.info(
+                        f"[处理任务] AI置信度不足({ai_result.confidence} < {confidence_threshold}): {path.name}"
+                    )
+                    user_choice = "skip"
+                    if confirm_low_confidence:
+                        user_choice = confirm_low_confidence(
+                            anime_name=name,
+                            path_name=path.name,
+                            confidence=ai_result.confidence,
+                            threshold=confidence_threshold,
+                            reason=ai_result.reason,
+                            extra_notes=ai_result.extra_notes,
+                        )
+                    if user_choice == "fallback":
+                        logger.info("[处理任务] 用户选择回退传统方法处理")
                         self._process_traditional(
                             path, rtpath_name, work_path, season_id
                         )
-                elif ai_result:
-                    logger.info(
-                        f"[处理任务] AI置信度不足({ai_result.confidence} < {confidence_threshold})，使用传统方法处理"
-                    )
-                    self._process_traditional(path, rtpath_name, work_path, season_id)
+                    elif user_choice == "abort":
+                        logger.info(f"[处理任务] 用户选择终止任务: {path.name}")
+                        return self.error_reply(
+                            _uuid,
+                            "任务已终止",
+                            path,
+                            is_anime,
+                            is_movie,
+                            name,
+                            season_id,
+                        )
+                    else:
+                        logger.info(f"[处理任务] 跳过低置信度项目: {path.name}")
+                        return self.error_reply(
+                            _uuid,
+                            f"[AI置信度不足] 评级为 {ai_result.confidence} (低于阈值 {confidence_threshold})，已跳过",
+                            path,
+                            is_anime,
+                            is_movie,
+                            name,
+                            season_id,
+                        )
                 else:
                     logger.info("[处理任务] AI未能返回有效结果（接口报错或用户放弃重试），使用传统方法处理")
                     self._process_traditional(path, rtpath_name, work_path, season_id)

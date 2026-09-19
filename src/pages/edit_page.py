@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 from nicegui import ui, run
 
-from ..component.retry_dialog import create_retry_callback
+from ..component.retry_dialog import (
+    create_retry_callback,
+    create_low_confidence_callback,
+)
 
 from ..logger import logger
 from ..rename.process import Rename
@@ -139,6 +142,7 @@ class EditPage(ui.dialog):
             cm.set_config('ai_enabled', False)
 
         confirm_retry = create_retry_callback()
+        confirm_low_confidence = create_low_confidence_callback()
         try:
             await run.io_bound(
                 Rename().process,
@@ -149,6 +153,7 @@ class EditPage(ui.dialog):
                 getattr(self.data, 'name'),
                 getattr(self.data, 'season_id'),
                 confirm_retry=confirm_retry,
+                confirm_low_confidence=confirm_low_confidence,
             )
         finally:
             if not use_ai:

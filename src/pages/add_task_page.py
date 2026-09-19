@@ -8,7 +8,10 @@ from ..rename.process import Rename
 from ..pages.data_table_page import create_table
 from ..element.red import RedButton, RedToogle, notify
 from ..component.local_file_picker import local_file_picker
-from ..component.retry_dialog import create_retry_callback
+from ..component.retry_dialog import (
+    create_retry_callback,
+    create_low_confidence_callback,
+)
 
 
 class choose_is_anime(ui.dialog):
@@ -64,6 +67,7 @@ async def pick_file() -> None:
         return notify('取消添加任务！')
 
     confirm_retry = create_retry_callback()
+    confirm_low_confidence = create_low_confidence_callback()
     for p in result:
         logger.info(f'[开始任务] 选择了 {result}')
         data = await run.io_bound(
@@ -71,6 +75,7 @@ async def pick_file() -> None:
             Path(p),
             is_anime,
             confirm_retry=confirm_retry,
+            confirm_low_confidence=confirm_low_confidence,
         )
         create_table.refresh()
         if isinstance(data, str):

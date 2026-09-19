@@ -9,7 +9,10 @@ from .edit_page import edit_page
 from ..utils.utils import get_task
 from ..rename.process import Rename
 from ..utils.path import TASK_PATH, RECORD_PATH
-from ..component.retry_dialog import create_retry_callback
+from ..component.retry_dialog import (
+    create_retry_callback,
+    create_low_confidence_callback,
+)
 
 
 @ui.refreshable
@@ -120,12 +123,14 @@ async def handle_retry(ev: GenericEventArguments):
     is_anime = row_data['is_anime']
     is_movie = row_data['is_movie']
     confirm_retry = create_retry_callback()
+    confirm_low_confidence = create_low_confidence_callback()
     data = await run.io_bound(
         Rename().process,
         Path(path),
         is_anime,
         is_movie,
         confirm_retry=confirm_retry,
+        confirm_low_confidence=confirm_low_confidence,
     )
     if isinstance(data, str):
         notify(data)
